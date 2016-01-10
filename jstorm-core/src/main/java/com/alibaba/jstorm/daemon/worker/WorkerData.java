@@ -95,6 +95,8 @@ public class WorkerData {
 
     // connection to other workers <NodePort, ZMQConnection>
     private ConcurrentHashMap<WorkerSlot, IConnection> nodeportSocket;
+    // intra node connections using memory mapped files to workers in same node
+    private ConcurrentHashMap<Integer, IConnection> intraNodeConnections;
     // <taskId, NodePort>
     private ConcurrentHashMap<Integer, WorkerSlot> taskNodeport;
 
@@ -153,6 +155,11 @@ public class WorkerData {
     private JStormMetricsReporter metricReporter;
 
     private AsyncLoopThread healthReporterThread;
+
+    /** This is the intranode server */
+    private IConnection intraNodeServer;
+
+    private boolean intraNodeMessagingEnabled = false;
 
     @SuppressWarnings({"rawtypes", "unchecked"})
     public WorkerData(Map conf, IContext context, String topology_id, String supervisor_id, int port, String worker_id, String jar_path) throws Exception {
@@ -269,6 +276,8 @@ public class WorkerData {
         this.sendingQueue.consumerStarted();
 
         this.nodeportSocket = new ConcurrentHashMap<WorkerSlot, IConnection>();
+        this.intraNodeConnections = new ConcurrentHashMap<Integer, IConnection>();
+        this.intraNodeMessagingEnabled = Utils.getBoolean(conf.get(Config.STORM_MESSAGING_INTRANODE_ENABLE), false);
         this.taskNodeport = new ConcurrentHashMap<Integer, WorkerSlot>();
         this.workerToResource = new ConcurrentSkipListSet<ResourceWorkerSlot>();
         this.innerTaskTransfer = new ConcurrentHashMap<Integer, DisruptorQueue>();
@@ -396,6 +405,10 @@ public class WorkerData {
 
     public ConcurrentHashMap<WorkerSlot, IConnection> getNodeportSocket() {
         return nodeportSocket;
+    }
+
+    public ConcurrentHashMap<Integer, IConnection> getIntraNodeConnections() {
+        return intraNodeConnections;
     }
 
     public ConcurrentHashMap<Integer, WorkerSlot> getTaskNodeport() {
@@ -636,5 +649,17 @@ public class WorkerData {
 
     public void setMetricsReporter(JStormMetricsReporter metricReporter) {
         this.metricReporter = metricReporter;
+    }
+
+    public IConnection getIntraNodeServer() {
+        return intraNodeServer;
+    }
+
+    public void setIntraNodeServer(IConnection intraNodeServer) {
+        this.intraNodeServer = intraNodeServer;
+    }
+
+    public boolean isIntraNodeMessagingEnabled() {
+        return intraNodeMessagingEnabled;
     }
 }

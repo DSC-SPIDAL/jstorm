@@ -18,9 +18,11 @@
 package com.alibaba.jstorm.task;
 
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import backtype.storm.tuple.Tuple;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -86,6 +88,13 @@ public class TaskTransfer {
 
     protected BackpressureController backpressureController;
 
+    protected ConcurrentHashMap<Integer, IConnection> intraNodeConnections;
+
+    protected boolean intraNodeMessagingEnabled = false;
+
+    // broadcast tasks for each stream
+    private DownstreamTasks downStreamTasks;
+
     public TaskTransfer(Task task, String taskName, KryoTupleSerializer serializer, TaskStatus taskStatus, WorkerData workerData) {
         this.task = task;
         this.taskName = taskName;
@@ -101,6 +110,9 @@ public class TaskTransfer {
         this.topolgyId = workerData.getTopologyId();
         this.componentId = this.task.getComponentId();
         this.taskId = this.task.getTaskId();
+
+        this.intraNodeConnections = workerData.getIntraNodeConnections();
+        this.intraNodeMessagingEnabled = workerData.isIntraNodeMessagingEnabled();
 
         int queue_size = Utils.getInt(storm_conf.get(Config.TOPOLOGY_EXECUTOR_SEND_BUFFER_SIZE));
         WaitStrategy waitStrategy = (WaitStrategy) JStormUtils.createDisruptorWaitStrategy(storm_conf);
@@ -123,19 +135,100 @@ public class TaskTransfer {
 
     }
 
+    public void setDownStreamTasks(DownstreamTasks downStreamTasks) {
+        this.downStreamTasks = downStreamTasks;
+    }
+
     public void transfer(TupleExt tuple) {
+        int targetTaskId = tuple.getTargetTaskId();
+        // this is equal to taskId
+        int sourceTaskId = tuple.getSourceTask();
+        GlobalTaskId globalStreamId = new GlobalTaskId(sourceTaskId, tuple.getSourceStreamId());
 
-        int taskId = tuple.getTargetTaskId();
-
-        DisruptorQueue exeQueue = innerTaskTransfer.get(taskId);
-        if (exeQueue != null) {
-            exeQueue.publish(tuple);
-        } else {
-            push(taskId, tuple);
+        // first check weather we need to skip
+        if (downStreamTasks.isSkip(globalStreamId, sourceTaskId, targetTaskId)) {
+            return;
         }
 
-        if (backpressureController.isBackpressureMode()) {
-            backpressureController.flowControl();
+        // we will get the target is no mapping
+        int mapping = downStreamTasks.getMapping(globalStreamId, sourceTaskId, targetTaskId);
+        // LOG.info("Got a mapping of task transfer {} --> {}", targetTaskId, mapping);
+        StringBuilder innerTaskTextMsg = new StringBuilder();
+        StringBuilder outerTaskTextMsg = new StringBuilder();
+        DisruptorQueue exeQueue = innerTaskTransfer.get(mapping);
+        if (exeQueue != null) {
+            // in this case we are not going to hit TaskReceiver, so we need to do what we did there
+            // lets determine weather we need to send this message to other tasks as well acting as an intermediary
+            Map<GlobalTaskId, Set<Integer>> downsTasks = downStreamTasks.allDownStreamTasks(mapping);
+            if (downsTasks != null && downsTasks.containsKey(globalStreamId) && !downsTasks.get(globalStreamId).isEmpty()) {
+                Set<Integer> tasks = downsTasks.get(globalStreamId);
+                byte[] tupleMessage = null;
+
+                for (Integer task : tasks) {
+                    if (task != mapping) {
+                        // these tasks can be in the same worker or in a different worker
+                        DisruptorQueue exeQueueNext = innerTaskTransfer.get(task);
+                        if (exeQueueNext != null) {
+                            innerTaskTextMsg.append(task).append(" ");
+                            exeQueueNext.publish(tuple);
+                        } else {
+                            outerTaskTextMsg.append(task).append(" ");
+                            if (tupleMessage == null) {
+                                tupleMessage = serializer.serialize(tuple);
+                            }
+                            TaskMessage taskMessage = new TaskMessage(task, tupleMessage, tuple.getSourceTask(), tuple.getSourceStreamId());
+                            IConnection conn = getConnection(task);
+                            if (conn != null) {
+                                conn.send(taskMessage);
+                            }
+                        }
+                    } else {
+                        innerTaskTextMsg.append(task).append(" ");
+                        exeQueue.publish(tuple);
+                    }
+                }
+            } else {
+                exeQueue.publish(tuple);
+            }
+        } else {
+            int taskid = tuple.getTargetTaskId();
+            byte[] tupleMessage;
+            tupleMessage = serializer.serialize(tuple);
+            TaskMessage taskMessage = new TaskMessage(taskid, tupleMessage,
+                    tuple.getSourceTask(), tuple.getSourceStreamId());
+            IConnection conn = getConnection(taskid);
+            if (conn != null) {
+                conn.send(taskMessage);
+            }
+        }
+    }
+
+    public void transfer(byte []tuple, int task, int sourceTask, String streamId) {
+        TaskMessage taskMessage = new TaskMessage(task, tuple, sourceTask, streamId);
+        IConnection conn = getConnection(task);
+        if (conn != null) {
+            conn.send(taskMessage);
+        } else {
+            String s = "No connection to task: " + task;
+            LOG.error(s);
+            throw new RuntimeException(s);
+        }
+    }
+
+    public void transfer(byte []tuple, Tuple tupleExt, int task) {
+        DisruptorQueue exeQueue = innerTaskTransfer.get(task);
+        if (exeQueue == null) {
+            TaskMessage taskMessage = new TaskMessage(task, tuple);
+            IConnection conn = getConnection(task);
+            if (conn != null) {
+                conn.send(taskMessage);
+            } else {
+                String s = "No connection to task: " + task;
+                LOG.error(s);
+                throw new RuntimeException(s);
+            }
+        } else {
+            exeQueue.publish(tupleExt);
         }
     }
     
@@ -212,21 +305,6 @@ public class TaskTransfer {
 
         }
 
-        protected IConnection getConnection(int taskId) {
-            IConnection conn = null;
-            WorkerSlot nodePort = taskNodeport.get(taskId);
-            if (nodePort == null) {
-                String errormsg = "IConnection to " + taskId + " can't be found";
-                LOG.warn("Internal transfer warn, throw tuple,", new Exception(errormsg));
-            } else {
-                conn = nodeportSocket.get(nodePort);
-                if (conn == null) {
-                    String errormsg = "NodePort to" + nodePort + " can't be found";
-                    LOG.warn("Internal transfer warn, throw tuple,", new Exception(errormsg));
-                }
-            }
-            return conn;
-        }
 
         protected void pullTuples(Object event) {
             TupleExt tuple = (TupleExt) event;
@@ -247,5 +325,29 @@ public class TaskTransfer {
         }
 
     }
+
+    protected IConnection getConnection(int taskId) {
+        IConnection conn = null;
+        WorkerSlot thisNodePort = taskNodeport.get(TaskTransfer.this.taskId);
+        WorkerSlot nodePort = taskNodeport.get(taskId);
+        if (nodePort == null) {
+            String errormsg = "can`t not found IConnection to " + taskId;
+            LOG.warn("Intra transfer warn", new Exception(errormsg));
+        } else {
+            // LOG.info("***********" + thisNodePort.getNodeId() + ":" + nodePort.getNodeId());
+            if (intraNodeMessagingEnabled && thisNodePort.getNodeId().equals(nodePort.getNodeId())) {
+                conn = intraNodeConnections.get(nodePort.getPort());
+            }
+            if (conn == null) {
+                conn = nodeportSocket.get(nodePort);
+                if (conn == null) {
+                    String errormsg = "can`t not found nodePort " + nodePort;
+                    LOG.warn("Intra transfer warn", new Exception(errormsg));
+                }
+            }
+        }
+        return conn;
+    }
+
 
 }

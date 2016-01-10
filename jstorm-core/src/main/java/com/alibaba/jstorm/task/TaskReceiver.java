@@ -18,8 +18,10 @@
 package com.alibaba.jstorm.task;
 
 import backtype.storm.Config;
+import backtype.storm.messaging.TaskMessage;
 import backtype.storm.serialization.KryoTupleDeserializer;
 import backtype.storm.task.TopologyContext;
+import backtype.storm.tuple.BatchTuple;
 import backtype.storm.tuple.Tuple;
 import backtype.storm.utils.DisruptorQueue;
 import backtype.storm.utils.WorkerClassLoader;
@@ -30,6 +32,7 @@ import com.alibaba.jstorm.client.ConfigExtension;
 import com.alibaba.jstorm.common.metric.AsmGauge;
 import com.alibaba.jstorm.common.metric.AsmHistogram;
 import com.alibaba.jstorm.common.metric.QueueGauge;
+import com.alibaba.jstorm.daemon.worker.timer.TimerTrigger;
 import com.alibaba.jstorm.metric.*;
 import com.alibaba.jstorm.utils.JStormUtils;
 import com.alibaba.jstorm.utils.TimeUtils;
@@ -41,7 +44,9 @@ import com.lmax.disruptor.dsl.ProducerType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
 public class TaskReceiver {
     private static Logger LOG = LoggerFactory.getLogger(TaskReceiver.class);
@@ -62,14 +67,23 @@ public class TaskReceiver {
 
     protected TaskStatus taskStatus;
 
+    // if this task works as a broadcast intermediary, what are the tasks we need to relay this message
+    // the tasks are grouped with stream id
+    protected DownstreamTasks downStreamTasks;
+
+    protected TaskTransfer taskTransfer;
+
     public TaskReceiver(Task task, int taskId, Map stormConf, TopologyContext topologyContext, Map<Integer, DisruptorQueue> innerTaskTransfer,
-            TaskStatus taskStatus, String taskName) {
+            TaskStatus taskStatus, String taskName,  DownstreamTasks downStreamTasks, TaskTransfer taskTransfer) {
         this.task = task;
         this.taskId = taskId;
         this.idStr = taskName;
 
         this.topologyContext = topologyContext;
         this.innerTaskTransfer = innerTaskTransfer;
+
+        this.taskTransfer = taskTransfer;
+        this.downStreamTasks = downStreamTasks;
 
         this.taskStatus = taskStatus;
 
@@ -163,12 +177,108 @@ public class TaskReceiver {
 
         @Override
         public void onEvent(Object event, long sequence, boolean endOfBatch) throws Exception {
-            Object tuple = deserialize((byte[]) event);
-
-            if (tuple != null) {
-                exeQueue.publish(tuple);
+            if (event instanceof TaskMessage) {
+                processTaskMessage((TaskMessage) event);
+            } else {
+                Object tuple = deserialize((byte[]) event);
+                if (tuple instanceof Tuple) {
+                    processTupleEvent((Tuple) tuple, event);
+                } else if (tuple instanceof BatchTuple) {
+                    for (Tuple t : ((BatchTuple) tuple).getTuples()) {
+                        processTupleEvent(t, event);
+                    }
+                } else if (tuple instanceof TimerTrigger.TimerEvent) {
+                    exeQueue.publish(event);
+                } else {
+                    LOG.warn("Received unknown message");
+                }
             }
         }
+
+        public void processTaskMessage(TaskMessage event)
+                throws Exception {
+            byte[] msg = event.message();
+            // LOG.info("Task message stream: " + taskMessage.stream() + " component: " + taskMessage.componentId());
+            Set<Integer> transferTasks = new HashSet<Integer>();
+            String streamId = event.stream();
+            int sourceTask = event.sourceTask();
+            String sourceComponent = topologyContext.getComponentId(sourceTask);
+            GlobalTaskId globalStreamId = new GlobalTaskId(sourceTask, streamId);
+            StringBuilder innerTaskTextMsg = new StringBuilder();
+            StringBuilder outerTaskTextMsg = new StringBuilder();
+            // lets determine weather we need to send this message to other tasks as well acting as an intermediary
+            Map<GlobalTaskId, Set<Integer>> downsTasks = downStreamTasks.allDownStreamTasks(taskId);
+            if (downsTasks != null && downsTasks.containsKey(globalStreamId) && !downsTasks.get(globalStreamId).isEmpty()) {
+                // for now lets use the deserialized task and send it back... ideally we should send the byte message
+                Set<Integer> tasks = downsTasks.get(globalStreamId);
+                for (Integer task : tasks) {
+                    if (task != taskId) {
+                        // these tasks can be in the same worker or in a different worker
+                        DisruptorQueue exeQueueNext = innerTaskTransfer.get(task);
+                        if (exeQueueNext != null) {
+                            innerTaskTextMsg.append(task).append(" ");
+                            transferTasks.add(task);
+                        } else {
+                            outerTaskTextMsg.append(task).append(" ");
+                            taskTransfer.transfer(msg, task, sourceTask, streamId);
+                        }
+                    } else {
+                        innerTaskTextMsg.append(task).append(" ");
+                        transferTasks.add(task);
+                    }
+                }
+            } else {
+                innerTaskTextMsg.append(taskId).append(" ");
+                transferTasks.add(taskId);
+            }
+            Object tuple = deserialize(msg);
+            if (tuple != null) {
+                for (Integer t : transferTasks) {
+                    if (t == taskId) {
+                        exeQueue.publish(tuple);
+                    } else {
+                        DisruptorQueue exeQueueNext = innerTaskTransfer.get(t);
+                        exeQueueNext.publish(tuple);
+                    }
+                }
+            }
+        }
+
+        private void processTupleEvent(Tuple tuple, Object event) {
+            if (tuple != null) {
+                String streamId = tuple.getSourceStreamId();
+                int sourceTask = tuple.getSourceTask();
+                GlobalTaskId globalStreamId = new GlobalTaskId(sourceTask, streamId);
+                // lets determine weather we need to send this message to other tasks as well acting as an intermediary
+                Map<GlobalTaskId, Set<Integer>> downsTasks = downStreamTasks.allDownStreamTasks(taskId);
+                if (downsTasks != null && downsTasks.containsKey(globalStreamId) && !downsTasks.get(globalStreamId).isEmpty()) {
+                    // for now lets use the deserialized task and send it back... ideally we should send the byte message
+                    Set<Integer> tasks = downsTasks.get(globalStreamId);
+                    StringBuilder innerTaskTextMsg = new StringBuilder();
+                    StringBuilder outerTaskTextMsg = new StringBuilder();
+                    for (Integer task : tasks) {
+                        if (task != taskId) {
+                            // these tasks can be in the same worker or in a different worker
+                            DisruptorQueue exeQueueNext = innerTaskTransfer.get(task);
+                            if (exeQueueNext != null) {
+                                innerTaskTextMsg.append(task).append(" ");
+                                exeQueueNext.publish(tuple);
+                            } else {
+                                outerTaskTextMsg.append(task).append(" ");
+                                taskTransfer.transfer((byte[]) event, tuple, task);
+                            }
+                        } else {
+                            innerTaskTextMsg.append(task).append(" ");
+                            exeQueue.publish(tuple);
+                        }
+                    }
+
+                } else {
+                    exeQueue.publish(tuple);
+                }
+            }
+        }
+
 
         @Override
         public void preRun() {

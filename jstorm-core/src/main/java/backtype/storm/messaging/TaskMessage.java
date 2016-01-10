@@ -22,10 +22,27 @@ import java.nio.ByteBuffer;
 public class TaskMessage {
     private int _task;
     private byte[] _message;
+    private int sourceTask;
+    private String stream;
 
     public TaskMessage(int task, byte[] message) {
         _task = task;
         _message = message;
+    }
+
+    public TaskMessage(int _task, byte[] _message, int sourceTask, String stream) {
+        this._task = _task;
+        this._message = _message;
+        this.sourceTask = sourceTask;
+        this.stream = stream;
+    }
+
+    public int sourceTask() {
+        return sourceTask;
+    }
+
+    public String stream() {
+        return stream;
     }
 
     public int task() {

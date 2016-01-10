@@ -73,7 +73,7 @@ public class MessageDecoder extends FrameDecoder {
         long available = buf.readableBytes();
         // Length of control message is 10.
         // Minimum length of a task message is 6(short taskId, int length).
-        if (available < 6) {
+        if (available < 10) {
             // need more data
             return null;
         }
@@ -127,7 +127,7 @@ public class MessageDecoder extends FrameDecoder {
             short task = code;
 
             // Make sure that we have received at least an integer (length)
-            if (available < 4) {
+            if (available < 8) {
                 // need more data
                 buf.resetReaderIndex();
 
@@ -141,13 +141,29 @@ public class MessageDecoder extends FrameDecoder {
                 return new TaskMessage(task, null);
             }
 
+            int headerLength = buf.readInt();
+            if (headerLength <= 0) {
+                LOG.info("Receive one message whose TaskMessage's message header length is {}",
+                        length);
+            }
+
             // Make sure if there's enough bytes in the buffer.
-            available -= 4;
+            available -= 8;
             if (available < length) {
                 // The whole bytes were not received yet - return null.
                 buf.resetReaderIndex();
 
                 return null;
+            }
+
+            int sourceTask = -1;
+            String stream = null;
+            if (headerLength > 0) {
+                ChannelBuffer header = buf.readBytes(headerLength);
+                String headerValue = new String(header.array());
+                String splits[] = headerValue.split(" ");
+                stream = splits[0];
+                sourceTask = Integer.parseInt(splits[1]);
             }
 
             // There's enough bytes in the buffer. Read it.
@@ -161,7 +177,7 @@ public class MessageDecoder extends FrameDecoder {
             // LOG.info("Receive task:{}, length: {}, data:{}",
             // task, length, JStormUtils.toPrintableString(rawBytes));
 
-            TaskMessage ret = new TaskMessage(task, rawBytes);
+            TaskMessage ret = new TaskMessage(task, rawBytes, sourceTask, stream);
             recvSpeed.update(rawBytes.length + 6);
             return ret;
         } finally {

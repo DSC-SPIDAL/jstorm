@@ -242,5 +242,11 @@
 			<version>1.10.19</version>
 			<scope>test</scope>
 		</dependency>
+
+		<dependency>
+			<groupId>net.openhft</groupId>
+			<artifactId>affinity</artifactId>
+			<version>3.0</version>
+		</dependency>
 	</dependencies>
 </project>

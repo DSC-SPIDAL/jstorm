@@ -511,6 +511,19 @@ public class Utils {
         }
     }
 
+    public static Boolean getBoolean(Object o, Boolean defaultValue) {
+        if (null == o) {
+            return defaultValue;
+        }
+        if (o instanceof Boolean) {
+            return (Boolean) o;
+        } else if (o instanceof String) {
+            return Boolean.parseBoolean(o.toString());
+        } else {
+            throw new IllegalArgumentException("Don't know how to convert " + o + " to int");
+        }
+    }
+
     public static long secureRandomLong() {
         return UUID.randomUUID().getLeastSignificantBits();
     }

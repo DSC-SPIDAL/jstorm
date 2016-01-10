@@ -142,6 +142,11 @@ supervisor.slots.ports: null
 #    - 6801
 #    - 6802
 #    - 6803
+#supervisor.slots.port.cpu.binds:
+#     - 6800: 1
+#     - 6801: 2
+#     - 6802: 3
+#     - 6804: 4
 supervisor.childopts: " -Xms512m -Xmx512m -Xmn128m -XX:PermSize=64m -XX:+UseConcMarkSweepGC  -XX:+UseCMSInitiatingOccupancyOnly -XX:CMSInitiatingOccupancyFraction=70 -XX:CMSFullGCsBeforeCompaction=5 -XX:+HeapDumpOnOutOfMemoryError  -verbose:gc -XX:+PrintGCDetails -XX:+PrintGCDateStamps  -XX:+PrintGCDetails -XX:+PrintGCDateStamps -XX:+UseGCLogFileRotation -XX:NumberOfGCLogFiles=5 -XX:GCLogFileSize=100M -XX:+UseCMSCompactAtFullCollection -XX:CMSMaxAbortablePrecleanTime=5000 "
 supervisor.run.worker.as.user: false
 #how long supervisor will wait to ensure that a worker process is started
@@ -224,6 +229,14 @@ storm.messaging.netty.authentication: false
 
 # default number of seconds group mapping service will cache user group
 storm.group.mapping.service.cache.duration.secs: 120
+
+# Intranode communications
+storm.messaging.intranode.enable: false
+# default location is set to memory
+storm.messaging.intranode.base_file: "/dev/shm"
+# 200 MB file for sharing data
+storm.messaging.intranode.file_size: 209715200
+storm.messaging.intranode.packet_size: 1024
 
 ### topology.* configs are for specific executing storms
 topology.enable.message.timeouts: true

@@ -100,7 +100,10 @@ class MessageBatch {
         if (taskMsg == null)
             return 0;
 
-        int size = 6; // INT + SHORT
+        int size = 10; // INT + INT + SHORT
+        String header = taskMsg.stream() + " " + taskMsg.sourceTask();
+        byte []headerBytes = header.getBytes();
+        size += headerBytes.length;
         if (taskMsg.message() != null)
             size += taskMsg.message().length;
         return size;
@@ -176,6 +179,10 @@ class MessageBatch {
 
         bout.writeShort((short) task_id);
         bout.writeInt(payload_len);
+        String header = message.stream() + " " + message.sourceTask();
+        byte []headerBytes = header.getBytes();
+        bout.writeInt(headerBytes.length);
+        bout.write(headerBytes);
         if (payload_len > 0)
             bout.write(message.message());
 

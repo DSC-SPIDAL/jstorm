@@ -92,6 +92,9 @@ public class Task implements Runnable{
     private boolean isTaskBatchTuple;
     private TaskShutdownDameon taskShutdownDameon;
 
+    // collective communication planner
+    private CommunicationPlanner ccPlanner;
+
     @SuppressWarnings("rawtypes")
     public Task(WorkerData workerData, int taskId) throws Exception {
         openOrPrepareWasCalled = new Atom(Boolean.valueOf(false));
@@ -113,6 +116,7 @@ public class Task implements Runnable{
         this.zkCluster =workerData.getZkCluster();
         this.taskStats = new TaskBaseMetric(topologyId, componentId, taskId,
                 ConfigExtension.isEnableMetrics(workerData.getStormConf()));
+        this.ccPlanner = new CommunicationPlanner(workerData);
 
         LOG.info("Begin to deserialize taskObj " + componentId + ":" + this.taskId);
 
@@ -199,10 +203,20 @@ public class Task implements Runnable{
 
     public TaskReceiver mkTaskReceiver() {
         String taskName = JStormServerUtils.getName(componentId, taskId);
-        if (isTaskBatchTuple)
-            taskReceiver = new TaskBatchReceiver(this, taskId, stormConf, topologyContext, innerTaskTransfer, taskStatus, taskName);
-        else
-            taskReceiver = new TaskReceiver(this, taskId, stormConf, topologyContext, innerTaskTransfer, taskStatus, taskName);
+        TaskReceiver taskReceiver;
+        DownstreamTasks downStreamTasks = ccPlanner.getDownStreamTasks(topologyContext, taskId);
+        if (isTaskBatchTuple) {
+            taskTransfer.setDownStreamTasks(downStreamTasks);
+            taskReceiver =
+                    new TaskBatchReceiver(this, taskId, stormConf,
+                            topologyContext, innerTaskTransfer, taskStatus,
+                            taskName, downStreamTasks, taskTransfer);
+        } else {
+            taskTransfer.setDownStreamTasks(downStreamTasks);
+            taskReceiver =
+                    new TaskReceiver(this, taskId, stormConf, topologyContext,
+                            innerTaskTransfer, taskStatus, taskName, downStreamTasks, taskTransfer);
+        }
         deserializeQueues.put(taskId, taskReceiver.getDeserializeQueue());
         return taskReceiver;
     }

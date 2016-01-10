@@ -40,6 +40,10 @@ import com.alibaba.jstorm.utils.PathUtils;
 import com.lmax.disruptor.WaitStrategy;
 import com.lmax.disruptor.dsl.ProducerType;
 import org.apache.commons.lang.StringUtils;
+import backtype.storm.generated.GlobalStreamId;
+import com.alibaba.jstorm.message.intranode.IntraNodeServer;
+import com.alibaba.jstorm.schedule.default_assign.ResourceWorkerSlot;
+import com.alibaba.jstorm.utils.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -83,6 +87,17 @@ public class Worker {
             for (Map<String, Grouping> e : targets.values()) {
                 for (String componentId : e.keySet()) {
                     List<Integer> tasks = context.getComponentTasks(componentId);
+                    rtn.addAll(tasks);
+                }
+            }
+
+            // if we are connected by a ALL task, we need to have connections to other tasks
+            Map<GlobalStreamId, Grouping> sources = context.getThisSources();
+            for (Map.Entry<GlobalStreamId, Grouping> e : sources.entrySet()) {
+                Grouping grouping = e.getValue();
+                if (Grouping._Fields.ALL.equals(Thrift.groupingType(grouping))) {
+                    List<Integer> tasks =
+                            context.getComponentTasks(context.getThisComponentId());
                     rtn.addAll(tasks);
                 }
             }
@@ -149,7 +164,22 @@ public class Worker {
         String topologyId = workerData.getTopologyId();
 
         IConnection recvConnection = context.bind(topologyId, workerData.getPort(), workerData.getDeserializeQueues());
+        String baseFile = (String) workerData.getConf().get(Config.STORM_MESSAGING_INTRANODE_BASE_FILE);
+        Set<ResourceWorkerSlot> workerSlots = workerData.getWorkerToResource();
+        Set<Integer> thisPorts = new HashSet<Integer>();
+        for (ResourceWorkerSlot resourceWorkerSlot : workerSlots) {
+            if (resourceWorkerSlot.getNodeId().equals(workerData.getSupervisorId())) {
+                thisPorts.add(resourceWorkerSlot.getPort());
+            }
+        }
 
+//        for (Integer port : thisPorts) {
+//            if (!port.equals(workerData.getPort())) {
+        if (workerData.isIntraNodeMessagingEnabled()) {
+            IConnection intraNodeServer = new IntraNodeServer(baseFile, workerData.getSupervisorId(), workerData.getPort(), workerData.getPort(),
+                    workerData.getDeserializeQueues(), workerData.getConf());
+            workerData.setIntraNodeServer(intraNodeServer);
+        }
         workerData.setRecvConnection(recvConnection);
     }
 

@@ -117,7 +117,7 @@ class NettyServer implements IConnection {
             return;
         }
 
-        queue.publish(message.message());
+        queue.publish(message);
     }
 
     /**

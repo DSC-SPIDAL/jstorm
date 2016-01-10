@@ -36,8 +36,8 @@ public class TaskBatchReceiver extends TaskReceiver {
     private static Logger LOG = LoggerFactory.getLogger(TaskBatchReceiver.class);
 
     public TaskBatchReceiver(Task task, int taskId, Map stormConf, TopologyContext topologyContext, Map<Integer, DisruptorQueue> innerTaskTransfer,
-            TaskStatus taskStatus, String taskName) {
-        super(task, taskId, stormConf, topologyContext, innerTaskTransfer, taskStatus, taskName);
+            TaskStatus taskStatus, String taskName, DownstreamTasks downstreamTasks, TaskTransfer taskTransfer) {
+        super(task, taskId, stormConf, topologyContext, innerTaskTransfer, taskStatus, taskName, downstreamTasks, taskTransfer);
     }
 
     @Override
